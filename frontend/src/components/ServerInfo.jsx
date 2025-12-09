@@ -23,8 +23,8 @@ function ServerInfo({ apiBaseUrl }) {
       </div>
       <div className="info-content" id={panelId} aria-hidden={!isOpen}>
         <p className="info-hint">
-          Update <code>VITE_API_BASE_URL</code> in your frontend <code>.env</code> to use your laptop&apos;s LAN IP so
-          phones on the same Wi-Fi can reach the backend.
+          Update <code>VITE_API_BASE_URL</code> in your frontend <code>.env</code> (dev) or drop a value into
+          <code>config/api-base-url</code> (Docker) to point phones at your laptop&apos;s LAN IP.
         </p>
       </div>
     </section>
