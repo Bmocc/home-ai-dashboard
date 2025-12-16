@@ -14,6 +14,23 @@ import './App.css'
 const HEALTH_POLL_INTERVAL_MS = 7000
 const SNAPSHOT_REFRESH_INTERVAL_MS = 4000
 
+const detectionFilters = [
+  { key: 'all', label: 'All' },
+  { key: 'people', label: 'People' },
+  { key: 'vehicles', label: 'Vehicles' },
+  { key: 'packages', label: 'Packages' },
+  { key: 'pets', label: 'Pets' },
+]
+
+const severityRank = { high: 3, medium: 2, low: 1 }
+
+const filterKeywords = {
+  people: ['person', 'people', 'human'],
+  vehicles: ['car', 'vehicle', 'truck', 'bus', 'bike'],
+  packages: ['package', 'box', 'parcel', 'delivery'],
+  pets: ['cat', 'dog', 'pet', 'animal'],
+}
+
 const getEventKey = (event) => {
   if (!event) {
     return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -46,16 +63,44 @@ function App() {
   const [isRefreshingHealth, setIsRefreshingHealth] = useState(false)
   const [snapshotSrc, setSnapshotSrc] = useState('')
   const [snapshotReady, setSnapshotReady] = useState(false)
+  const [autoRefreshSnapshot, setAutoRefreshSnapshot] = useState(true)
+  const [snapshotDimensions, setSnapshotDimensions] = useState({ width: null, height: null })
+  const [lastSnapshotAt, setLastSnapshotAt] = useState(null)
+  const [isSnapshotRefreshing, setIsSnapshotRefreshing] = useState(false)
   const [authError, setAuthError] = useState('')
   const [isAuthenticating, setIsAuthenticating] = useState(false)
+  const [isEventsLoading, setIsEventsLoading] = useState(false)
+  const [activeFilter, setActiveFilter] = useState('all')
+  const [sortMode, setSortMode] = useState('newest')
+  const [highlightedIds, setHighlightedIds] = useState([])
+  const [livePaused, setLivePaused] = useState(false)
+  const [queuedEvents, setQueuedEvents] = useState([])
   const messageTimeoutRef = useRef(null)
   const initialLoadRef = useRef(false)
+  const initialEventId = useMemo(() => {
+    const params = new URLSearchParams(window.location.search)
+    const val = params.get('event')
+    return val ? String(val) : null
+  }, [])
 
   const healthMeta = useMemo(() => {
     if (healthStatus === 'connected') return { label: 'Connected', tone: 'status-ok' }
     if (healthStatus === 'disconnected') return { label: 'Disconnected', tone: 'status-bad' }
     return { label: 'Checking…', tone: 'status-warn' }
   }, [healthStatus])
+
+  const latestDetection = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]
+      if (ev?.detections?.length) return ev.detections[0]
+    }
+    return null
+  }, [events])
+
+  const trendData = useMemo(() => {
+    const slice = events.slice(-7)
+    return slice.map((ev) => severityRank[String(ev.severity || '').toLowerCase()] || 1)
+  }, [events])
 
   const statCards = useMemo(() => {
     const totalEvents = events.length
@@ -85,14 +130,15 @@ function App() {
         subValue: `Severity: ${lastSeverity}`,
         accent: 'neutral',
       },
-      // {
-      //   label: 'Connection',
-      //   value: healthMeta.label,
-      //   subValue: healthStatus === 'connected' ? 'Streaming live' : 'Reconnecting…',
-      //   accent: healthStatus === 'connected' ? 'success' : 'warning',
-      // },
+      {
+        label: 'AI Detections',
+        value: latestDetection ? latestDetection.label : '--',
+        subValue: latestDetection ? `Conf: ${(latestDetection.confidence * 100).toFixed(0)}%` : 'None yet',
+        accent: 'success',
+        trend: trendData,
+      },
     ]
-  }, [events, healthMeta.label, healthStatus])
+  }, [events, healthMeta.label, healthStatus, latestDetection, trendData])
 
   const handleLogout = useCallback(() => {
     setToken('')
@@ -104,6 +150,7 @@ function App() {
     setSnapshotReady(false)
     setProfileStatus('')
     setProfileError('')
+    setActiveFilter('all')
   }, [setToken])
 
   const securedFetch = useCallback(
@@ -160,6 +207,7 @@ function App() {
     async (options = {}) => {
       if (!token) return
       const { forceReplace = false } = options
+      if (!initialLoadRef.current) setIsEventsLoading(true)
       try {
         const response = await securedFetch(`${API_BASE_URL}/api/motion-events`)
         if (!response.ok) throw new Error('Could not load events')
@@ -172,6 +220,8 @@ function App() {
         if (!initialLoadRef.current) initialLoadRef.current = true
       } catch (error) {
         console.error('Failed to load events', error)
+      } finally {
+        setIsEventsLoading(false)
       }
     },
     [securedFetch, token],
@@ -201,12 +251,25 @@ function App() {
     }
     const refreshSnapshot = () => {
       setSnapshotReady(false)
+      setIsSnapshotRefreshing(true)
       setSnapshotSrc(`${API_BASE_URL}/api/latest-frame?t=${Date.now()}`)
     }
     refreshSnapshot()
-    const intervalId = setInterval(refreshSnapshot, SNAPSHOT_REFRESH_INTERVAL_MS)
-    return () => clearInterval(intervalId)
-  }, [API_BASE_URL, token])
+    let intervalId
+    if (autoRefreshSnapshot) {
+      intervalId = setInterval(refreshSnapshot, SNAPSHOT_REFRESH_INTERVAL_MS)
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [API_BASE_URL, autoRefreshSnapshot, token])
+
+  const handleManualSnapshotRefresh = () => {
+    if (!token) return
+    setSnapshotReady(false)
+    setIsSnapshotRefreshing(true)
+    setSnapshotSrc(`${API_BASE_URL}/api/latest-frame?t=${Date.now()}`)
+  }
 
   const handleSimulateEvent = async () => {
     if (!token) return
@@ -215,6 +278,14 @@ function App() {
     try {
       const response = await securedFetch(`${API_BASE_URL}/api/motion-events/simulate`, { method: 'POST' })
       if (!response.ok) throw new Error('Simulation failed')
+      const data = await response.json().catch(() => null)
+      if (data) {
+        const key = getEventKey(data)
+        setHighlightedIds((prev) => (prev.includes(key) ? prev : [...prev, key]))
+        setTimeout(() => {
+          setHighlightedIds((prev) => prev.filter((id) => id !== key))
+        }, 2500)
+      }
       setEventTone('success')
       setStatusMessage('Simulated motion event added.')
       await fetchEvents({ forceReplace: true })
@@ -228,6 +299,45 @@ function App() {
       messageTimeoutRef.current = setTimeout(() => setStatusMessage(''), 4000)
     }
   }
+
+  useEffect(() => {
+    const onKeydown = (event) => {
+      if (!token) return
+      const tag = event.target?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      if (event.key?.toLowerCase() === 's' && !isSimulating) {
+        event.preventDefault()
+        handleSimulateEvent()
+      }
+    }
+    window.addEventListener('keydown', onKeydown)
+    return () => window.removeEventListener('keydown', onKeydown)
+  }, [handleSimulateEvent, isSimulating, token])
+
+  const filteredEvents = useMemo(() => {
+    const matchesFilter = (event) => {
+      if (activeFilter === 'all') return true
+      const keywords = filterKeywords[activeFilter] || []
+      const text = `${event?.message || ''} ${(event?.detections || [])
+        .map((d) => d.label || '')
+        .join(' ')}`.toLowerCase()
+      return keywords.some((kw) => text.includes(kw))
+    }
+
+    const sorted = [...events].filter(matchesFilter)
+
+    if (sortMode === 'severity') {
+      sorted.sort((a, b) => {
+        const aRank = severityRank[String(a.severity || '').toLowerCase()] || 0
+        const bRank = severityRank[String(b.severity || '').toLowerCase()] || 0
+        if (bRank !== aRank) return bRank - aRank
+        return new Date(b.timestamp || 0) - new Date(a.timestamp || 0)
+      })
+      return sorted
+    }
+
+    return sorted.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0))
+  }, [activeFilter, events, sortMode])
 
   useEffect(() => {
     if (!token) return undefined
@@ -252,21 +362,31 @@ function App() {
       try {
         const payload = JSON.parse(event.data)
         if (payload?.type === 'motion_event' && payload.payload) {
-          setEvents((prev) => mergeEvents(prev, [payload.payload]))
+          if (livePaused) {
+            setQueuedEvents((prev) => mergeEvents(prev, [payload.payload]))
+          } else {
+            setEvents((prev) => mergeEvents(prev, [payload.payload]))
+            const key = getEventKey(payload.payload)
+            setHighlightedIds((prev) => (prev.includes(key) ? prev : [...prev, key]))
+            setTimeout(() => {
+              setHighlightedIds((prev) => prev.filter((id) => id !== key))
+            }, 2500)
+          }
         }
       } catch (error) {
         console.error('Failed to parse motion event message', error)
       }
     }
 
-    socket.onerror = (error) => {
-      console.error('WebSocket error', error)
+    socket.onerror = () => {
+      // If backend isn't reachable yet, avoid spamming errors; reconnection handled by reload/login.
+      console.warn('WebSocket connection issue; will retry on next reload/login.')
     }
 
     return () => {
       socket.close()
     }
-  }, [API_BASE_URL, token])
+  }, [API_BASE_URL, token, livePaused])
 
   const handleLogin = async ({ username: submittedUser, password }) => {
     setIsAuthenticating(true)
@@ -355,23 +475,72 @@ function App() {
       </div>
 
       <main className="app-content">
-        <StatsRow stats={statCards} />
+        <StatsRow stats={statCards} isLoading={isEventsLoading && !events.length} />
+
+        {healthStatus === 'disconnected' ? (
+          <div className="reconnect-banner" role="status">
+            <span className="status-dot status-dot--alert" aria-hidden />
+            Connection lost. Retrying…
+          </div>
+        ) : null}
 
         <div className="overview-grid">
           <LiveSnapshot
             snapshotSrc={snapshotSrc}
             isAvailable={snapshotReady}
-            onImageLoad={() => setSnapshotReady(true)}
-            onImageError={() => setSnapshotReady(false)}
+            onImageLoad={(e) => {
+              setSnapshotReady(true)
+              setIsSnapshotRefreshing(false)
+              setLastSnapshotAt(new Date())
+              if (e?.target?.naturalWidth && e?.target?.naturalHeight) {
+                setSnapshotDimensions({ width: e.target.naturalWidth, height: e.target.naturalHeight })
+              }
+            }}
+            onImageError={() => {
+              setSnapshotReady(false)
+              setIsSnapshotRefreshing(false)
+            }}
+            lastUpdated={lastSnapshotAt}
+            sourceLabel="Laptop Cam"
+            onRefresh={handleManualSnapshotRefresh}
+            isRefreshing={isSnapshotRefreshing}
+            autoRefresh={autoRefreshSnapshot}
+            onToggleAutoRefresh={() => setAutoRefreshSnapshot((prev) => !prev)}
+            refreshIntervalMs={SNAPSHOT_REFRESH_INTERVAL_MS}
+            dimensions={snapshotDimensions}
           />
         </div>
 
         <EventsList
-          events={events}
+          events={filteredEvents}
           statusMessage={statusMessage}
           statusTone={eventTone}
           isSimulating={isSimulating}
           onSimulate={handleSimulateEvent}
+          activeFilter={activeFilter}
+          onFilterChange={setActiveFilter}
+          sortMode={sortMode}
+          onSortChange={setSortMode}
+          filters={detectionFilters}
+          onRefresh={() => fetchEvents({ forceReplace: true })}
+          isLoading={isEventsLoading && !events.length}
+          highlightedIds={highlightedIds}
+          apiBaseUrl={API_BASE_URL}
+          filterSummary={`Showing ${filteredEvents.length} events • Filter: ${
+            detectionFilters.find((f) => f.key === activeFilter)?.label || 'All'
+          } • Sort: ${sortMode === 'severity' ? 'Severity' : 'Newest'}`}
+          livePaused={livePaused}
+          onToggleLivePaused={() => {
+            setLivePaused((prev) => {
+              if (prev) {
+                setEvents((existing) => mergeEvents(existing, queuedEvents))
+                setQueuedEvents([])
+              }
+              return !prev
+            })
+          }}
+          queuedCount={queuedEvents.length}
+          initialEventId={initialEventId}
         />
       </main>
       {isConfigOpen ? (

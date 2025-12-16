@@ -2,6 +2,10 @@ fastapi
 uvicorn[standard]
 python-dotenv
 pydantic
+pydantic-settings
 typing-extensions
 opencv-python
 PyJWT
+requests
+torch
+ultralytics

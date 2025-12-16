@@ -41,6 +41,17 @@ Authentication:
 - Tweaks available: `CAM_FRAME_INTERVAL`, `CAM_MOTION_THRESHOLD`, `CAM_MIN_AREA`, and `CAM_BASELINE_REFRESH_FRAMES` in `.env`.
 - Windows/macOS may prompt for camera permission the first time Python/OpenCV tries to read from the webcam—allow access so events can be generated.
 
+### AI object detection (CPU/GPU toggle)
+- Backend can run YOLO detections on frames that already passed the motion check. Configure in `backend/.env`:
+  - `AI_DETECTION_ENABLED=true|false`
+  - `AI_DEVICE_MODE=cpu|gpu` (GPU attempts CUDA; falls back to CPU if unavailable)
+  - `AI_MODEL_PATH` (default `models/yolov8n.pt`)
+  - `AI_CONFIDENCE_THRESHOLD` and `AI_MAX_DETECTIONS`
+- Model files to download:
+  - CPU-friendly: `yolov8n.pt` → place at `backend/models/yolov8n.pt`
+  - GPU (faster/richer): `yolov8s.pt` (or larger) → set `AI_MODEL_PATH` accordingly. Install a CUDA-enabled Torch build from https://pytorch.org/get-started/locally/ if you want GPU acceleration.
+- When enabled, motion events include detection summaries in the `message` plus a `detections` array (label + confidence) in the REST/WebSocket payloads.
+
 ## Frontend
 1. `cd frontend`
 2. Copy the env example and update `VITE_API_BASE_URL` if your phone should hit a LAN IP (e.g., `http://192.168.1.50:8000`):  
@@ -107,4 +118,5 @@ Configuration:
 - Backend: FastAPI served via `uvicorn` on `0.0.0.0:8000`, with host/port + future secrets loaded from `.env`.
 - Frontend: React + Vite served on `0.0.0.0:5173`, configured via `VITE_API_BASE_URL` (or Docker runtime config) for LAN-friendly API calls and `ws://` streaming.
 - Access from laptop using `localhost`; access from phones using `http://<laptop_LAN_IP>`. Keep both devices on the same Wi-Fi.
+- Optional: object detection on motion frames using YOLO with `AI_DEVICE_MODE` set to `cpu` or `gpu`.
 - This is a stub meant to host future AI-powered motion detection logic while keeping today’s wiring simple, configurable, and testable—even your built-in laptop camera can trigger events today.
